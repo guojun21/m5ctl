@@ -73,7 +73,9 @@ if [ "$(ts_state)" != "Running" ]; then
     tailscale up --authkey="$TS_AUTHKEY" --hostname="$TS_HOSTNAME" --accept-routes=false --timeout=60s >/tmp/tsup.log 2>&1 \
       || say "错误:tailscale up 失败:$(tail -2 /tmp/tsup.log | tr '\n' ' ')"
   else
-    nohup tailscale up --hostname="$TS_HOSTNAME" --accept-routes=false >/tmp/tsup.log 2>&1 &
+    # 已有一个 tailscale up 在等批准就复用它的链接;再起一个会换新链接,之前发给用户的那个就作废了
+    pgrep -f '^tailscale up' >/dev/null \
+      || nohup tailscale up --hostname="$TS_HOSTNAME" --accept-routes=false >/tmp/tsup.log 2>&1 &
     for _ in $(seq 20); do grep -q 'https://login.tailscale.com' /tmp/tsup.log 2>/dev/null && break; sleep 0.5; done
     url=$(grep -o 'https://login.tailscale.com[^ ]*' /tmp/tsup.log | head -1)
     say "没有 TS_AUTHKEY。请把这个链接发给用户,让其用 Tailscale 账号批准本容器入网:${url:-<见 /tmp/tsup.log>}"
@@ -136,6 +138,15 @@ if [ "$(ts_state)" = "Running" ]; then
     say "就绪:已连上 $M5_HOST ($out)。用法见 CLAUDE.md;机器相关的私有说明先读:m5cat .config/m5ctl/PRIVATE.md"
   else
     say "tailnet 已连,但 SSH 到 $M5_HOST 失败:$(printf '%s' "$out" | tail -1)"
+    # 重跑时密钥早已生成,第 4 步不会再打印公钥,这里补上
+    if printf '%s' "$out" | grep -q 'Permission denied'; then
+      if [ -n "${M5_SSH_KEY_B64:-}" ]; then
+        say "M5_SSH_KEY_B64 对应的公钥不在 $M5_HOST 的 ~/.ssh/authorized_keys 里(或 from= 来源限制不匹配)"
+      else
+        say "本容器的公钥还没加到 $M5_HOST。请让用户在 $M5_HOST 上执行(仅对本容器有效):"
+        say "  echo '$(cat ~/.ssh/id_ed25519.pub)' >> ~/.ssh/authorized_keys"
+      fi
+    fi
   fi
 else
   say "tailnet 未连通(state=$(ts_state)),m5 命令暂不可用。连通后重跑:bash $REPO/scripts/bootstrap.sh"
