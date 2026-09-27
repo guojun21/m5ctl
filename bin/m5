@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# m5 — 在目标 Mac(默认 m5pro)上远程执行,只回传结果(云端容器版,经 Tailscale+SOCKS 的 ssh m5)。
+# 用法见 `m5 --help`。其余 m5* 命令均为本脚本的 symlink,按 $0 分发。
+set -uo pipefail
+
+M5HOST=m5                 # ~/.ssh/config 里的别名(带 ControlMaster,走 SOCKS ProxyCommand)
+M5HOME="${M5_HOME:-/Users/${M5_USER:-m5pro}}"   # 目标机上的家目录
+RPATH='export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH";'
+
+# 路径翻译:相对路径 / ~ → m5pro 上的绝对路径(容器里没有 SMB 挂载,故略去 /Volumes 翻译)
+rp() {
+  case "$1" in
+    /*)   printf '%s' "$1" ;;
+    ~/*)  printf '%s' "$M5HOME/${1#\~/}" ;;
+    *)    printf '%s' "$M5HOME/$1" ;;
+  esac
+}
+
+# 把参数安全拼成远端命令行
+qjoin() { local o=""; for a in "$@"; do o+=" $(printf '%q' "$a")"; done; printf '%s' "$o"; }
+
+rexec() { ssh "$M5HOST" "$RPATH $*"; }
+
+# 分离 flag 与位置参数。第一个参数是「需要吃掉下一个参数作为值」的 flag 列表。
+split_args() {
+  local valflags="$1"; shift
+  FLAGS=(); POS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) FLAGS+=("$1") ;;
+      -*)
+        if [[ " $valflags " == *" $1 "* ]] && [ $# -ge 2 ]; then
+          FLAGS+=("$1" "$2"); shift
+        else
+          FLAGS+=("$1")
+        fi
+        ;;
+      *) POS+=("$1") ;;
+    esac
+    shift
+  done
+}
+RG_VAL='-e --regexp -g --glob --iglob -t --type -T --type-not -m --max-count -A --after-context -B --before-context -C --context --max-depth -j --threads --sort --sortr'
+FD_VAL='-e --extension -t --type -d --max-depth --min-depth -E --exclude -j --threads -S --size --changed-within --changed-before --format'
+LS_VAL=''
+
+usage() {
+  cat <<'EOF'
+m5 — 在 m5pro 上干活,只回传结果(云端容器 → Tailscale → ssh)
+
+  m5 <命令...>              任意命令在 m5pro 上执行
+  m5 -                      交互式 shell
+  m5grep <模式> [路径...]    远端 ripgrep
+  m5find <模式> [路径...]    远端 fd
+  m5cat  <文件...>           远端读文件
+  m5ls   [路径] [ls参数]     远端列目录
+  m5tree [路径] [深度]       远端树状列表(默认深度 2)
+  m5write <远端文件>         本机 stdin → 远端文件(覆盖)
+  m5sed  <sed脚本> <文件...> 远端原地修改
+  m5pull <远端> <本地>       rsync 拉回(压缩+增量)
+  m5push <本地> <远端>       rsync 推过去
+  m5du   [路径]              远端磁盘占用
+
+路径可写 '~/xxx'(加引号)、xxx(相对家目录)或绝对路径,自动翻译到目标机家目录。
+EOF
+}
+
+case "$(basename "$0")" in
+  m5grep)
+    split_args "$RG_VAL" "$@"
+    [ ${#POS[@]} -ge 1 ] || { echo "用法: m5grep <模式> [路径...]" >&2; exit 2; }
+    pat="${POS[0]}"; paths=()
+    for p in "${POS[@]:1}"; do paths+=("$(rp "$p")"); done
+    [ ${#paths[@]} -eq 0 ] && paths=("$M5HOME")
+    rexec "rg --hidden --no-messages$(qjoin "${FLAGS[@]+"${FLAGS[@]}"}") --$(qjoin "$pat")$(qjoin "${paths[@]}")"
+    ;;
+  m5find)
+    split_args "$FD_VAL" "$@"
+    [ ${#POS[@]} -ge 1 ] || { echo "用法: m5find <模式> [路径...]" >&2; exit 2; }
+    pat="${POS[0]}"; paths=()
+    for p in "${POS[@]:1}"; do paths+=("$(rp "$p")"); done
+    [ ${#paths[@]} -eq 0 ] && paths=("$M5HOME")
+    rexec "fd --hidden$(qjoin "${FLAGS[@]+"${FLAGS[@]}"}") --$(qjoin "$pat")$(qjoin "${paths[@]}")"
+    ;;
+  m5cat)
+    [ $# -ge 1 ] || { echo "用法: m5cat <文件...>" >&2; exit 2; }
+    f=(); for p in "$@"; do f+=("$(rp "$p")"); done
+    rexec "cat$(qjoin "${f[@]}")"
+    ;;
+  m5ls)
+    split_args "$LS_VAL" "$@"
+    paths=(); for p in "${POS[@]+"${POS[@]}"}"; do paths+=("$(rp "$p")"); done
+    [ ${#paths[@]} -eq 0 ] && paths=("$M5HOME")
+    rexec "ls -lah$(qjoin "${FLAGS[@]+"${FLAGS[@]}"}")$(qjoin "${paths[@]}")"
+    ;;
+  m5tree)
+    p="$(rp "${1:-$M5HOME}")"; d="${2:-2}"
+    rexec "find $(printf '%q' "$p") -maxdepth $(printf '%q' "$d") -not -path '*/.git/*' | sort"
+    ;;
+  m5write)
+    [ $# -eq 1 ] || { echo "用法: 某命令 | m5write <远端文件>" >&2; exit 2; }
+    ssh "$M5HOST" "cat > $(printf '%q' "$(rp "$1")")"
+    ;;
+  m5sed)
+    [ $# -ge 2 ] || { echo "用法: m5sed <sed脚本> <文件...>" >&2; exit 2; }
+    scr="$1"; shift; f=(); for p in "$@"; do f+=("$(rp "$p")"); done
+    rexec "sed -i '' $(printf '%q' "$scr")$(qjoin "${f[@]}")"
+    ;;
+  m5pull)
+    [ $# -eq 2 ] || { echo "用法: m5pull <远端> <本地>" >&2; exit 2; }
+    rsync -azP -e ssh "$M5HOST:$(rp "$1")" "$2"
+    ;;
+  m5push)
+    [ $# -eq 2 ] || { echo "用法: m5push <本地> <远端>" >&2; exit 2; }
+    rsync -azP -e ssh "$1" "$M5HOST:$(rp "$2")"
+    ;;
+  m5du)
+    rexec "du -sh $(printf '%q' "$(rp "${1:-$M5HOME}")")"
+    ;;
+  *)
+    case "${1:-}" in
+      ""|--help|-h) usage; exit 0 ;;
+      -) exec ssh -t "$M5HOST" ;;
+    esac
+    if [ $# -eq 1 ] && [[ "$1" == *[\ $'\t'\|\&\;\<\>\(\)\$\`\*]* ]]; then
+      rexec "$1"
+    else
+      rexec "$(qjoin "$@")"
+    fi
+    ;;
+esac

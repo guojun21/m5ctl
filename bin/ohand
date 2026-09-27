@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ohand（云端容器侧）—— 把命令丢给目标机 GUI 会话里的 orangeHand.app 执行。
+# SSH 会话够不到目标机的 login Keychain(lark/hr/cookie 解密全跑不动);orangeHand 住在
+# GUI 会话里,钥匙串与受 TCC 保护目录都够得着,其 spawn 的子进程继承授权 —— 权限最大。
+#   ohand "lark auth status"
+#   ohand --cwd /Users/<你>/some/dir "ls -la"
+#   ohand --timeout 30 "…"
+#   ohand status
+# 命令用 base64 过一道再进 ssh,躲开三层引号地狱。普通命令继续用 m5,别都往这塞。
+set -uo pipefail
+M5="$(dirname "$0")/m5"
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  sed -n '2,12p' "$0" | sed 's|^# \{0,1\}||'
+  [ $# -eq 0 ] && exit 2 || exit 0
+fi
+[ "$1" = "status" ] && exec "$M5" 'ohand status'
+PASS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd)     PASS+=(--cwd "$2"); shift 2 ;;
+    --timeout) PASS+=(--timeout "$2"); shift 2 ;;
+    *)         break ;;
+  esac
+done
+[ $# -eq 0 ] && { echo "ohand: 没给命令" >&2; exit 2; }
+B64=$(printf 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; %s' "$*" | base64 | tr -d '\n')
+exec "$M5" "OHAND_FROM=cloud/claude ohand ${PASS[*]:-} --b64 $B64"

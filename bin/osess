@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# osess — 查询目标机上的 AI session。重活在 m5pro 跑,本机只回传结果。
+# 后端:目标机上的 ~/.local/bin/_osess.py,列表复用 orangeSession 的 scanner.js。
+set -uo pipefail
+usage() {
+  cat <<'H'
+osess — 查目标机上的 AI session(Claude / Codex / Cursor)
+
+  osess ls [--n 20] [--source claude|codex|cursor] [--q 关键词]
+  osess stats             总览:各来源数量 + transcript 体积
+  osess grep <模式> [--n 15]
+  osess brief <id>        一屏交代这个 session 在干什么、干到哪了
+  osess show <id> [--tail N] [--max 2000]
+  osess path <id>         定位 transcript 文件路径
+H
+}
+[ $# -eq 0 ] && { usage; exit 0; }
+case "$1" in -h|--help|help) usage; exit 0 ;; esac
+q=""; for a in "$@"; do q+=" $(printf '%q' "$a")"; done
+exec ssh m5 "export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:\$PATH\"; python3 \$HOME/.local/bin/_osess.py$q"

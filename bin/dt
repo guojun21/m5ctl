@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# dt <实例> <命令> [profile] — 在阿里云 DSW 实例的终端里跑命令。
+# 真正干活的是目标机本地的 ~/.local/bin/dswrun(实例地址、区域、登录态都在那边,不进本仓库)。
+# 命令先 base64 再过 ssh,躲开多层引号。长任务在实例上用 setsid nohup 起,dt 只负责起和看日志。
+[ $# -ge 2 ] || { sed -n '2,4p' "$0" | sed 's|^# \{0,1\}||'; exit 2; }
+B=$(printf '%s' "$2" | base64 | tr -d '\n')
+exec "$(dirname "$0")/m5" "dswrun $(printf '%q' "$1") \"\$(echo $B | base64 -d)\" ${3:-71}"
